@@ -1,0 +1,3 @@
+### Fixed
+
+- **`@reticlehq/core`, `@reticlehq/engine`: `element` predicates rejected the flat `scope` and `self` fields that the syntax and `look find` both accept.** A step written as `{kind: "element", text: "...", scope: "#panel"}` failed to compile, and the only accepted spelling was the nested `query` form — so the shorthand worked everywhere except the place it was documented for. The engine also carried a second, drifting copy of the field table. `scope` and `self` are now lifted into the query like every other shorthand, and the engine derives the table from core instead of keeping its own. Closes [#1375](https://github.com/reticlehq/reticle/issues/1375).

@@ -29,8 +29,9 @@
 
 import { describe, expect, it } from 'vitest';
 import { PredicateSchema } from './predicate/predicate-eval.js';
+import { residualQueryChecks } from './predicate/predicate-schema.js';
 import { evalRoute } from './predicate/predicate-route.js';
-import { EventType, type ReticleEvent } from '@reticlehq/core';
+import { EventType, QueryBy, type ReticleEvent } from '@reticlehq/core';
 
 describe('a predicate key that is not real is refused, never dropped', () => {
   it('route { path } no longer degrades to "any route change"', () => {
@@ -208,5 +209,66 @@ describe('an unknown key inside `element.query` is refused too', () => {
     expect(
       PredicateSchema.parse({ kind: 'element', role: 'button', name: 'Deploy' }),
     ).toMatchObject({ kind: 'element', query: { role: 'button', name: 'Deploy' } });
+  });
+
+  it('lifts a flat `scope` into the query instead of refusing the key', () => {
+    // `scope` is an `ElementQuerySchema` field the locator CONSUMES, and `reticle_look` takes it at
+    // the top level — so an agent that has just scoped a search writes the same word when it asserts
+    // on the result, and got `unrecognized key scope` for its trouble.
+    expect(PredicateSchema.parse({ kind: 'element', text: 'x', scope: '#a' })).toMatchObject({
+      kind: 'element',
+      query: { text: 'x', scope: '#a' },
+    });
+  });
+
+  it('lifts a flat `self` into the query too', () => {
+    expect(PredicateSchema.parse({ kind: 'element', scope: '#a', self: true })).toMatchObject({
+      kind: 'element',
+      query: { scope: '#a', self: true },
+    });
+  });
+});
+
+/**
+ * A field the locator itself uses must never come back as one it dropped.
+ *
+ * `residualQueryChecks` walks the query's OWN keys — every field the caller wrote — so every field
+ * that is not a locator has to be CLAIMED in `usedQueryFields`, or it falls through to `unusable`
+ * and the agent is told the locator ignores a field it is matching on. Walking the caller's keys is
+ * what makes the check complete: a hand-written list beside the schema is how `scope`, `self`,
+ * `attrs` and `source` came to be absent from it in the first place (issue #1375).
+ *
+ * These are the four that were not claimed. The failure is not cosmetic: the message is what an agent
+ * retries against, and it names the field it should keep using as the one to remove.
+ */
+describe('a field the locator uses is never reported as dropped', () => {
+  it('`source` resolves the match, so it is not unverifiable', () => {
+    // `by`+`value` returns from `usedQueryFields` before the component/source branch is reached, so
+    // `source` never entered `used` — and being an object rather than a string it could not be
+    // checked either. Both halves pushed it into `unusable`.
+    const { checks, unusable } = residualQueryChecks({
+      by: QueryBy.ROLE,
+      value: 'button',
+      source: { file: 'App.tsx', line: 4 },
+    });
+    expect(unusable).toEqual([]);
+    expect(checks).toEqual([]);
+  });
+
+  it('`self: false` is a value, not a field to drop', () => {
+    // The `true === query.self` guard skips the `false` case, and a boolean is not a string, so a
+    // caller who spelled out the default was told the field could not be verified.
+    const { unusable } = residualQueryChecks({ scope: '#a', self: false });
+    expect(unusable).toEqual([]);
+  });
+
+  it('`attrs` projects the match rather than being dropped by it', () => {
+    const { unusable } = residualQueryChecks({ role: 'link', attrs: ['href'] });
+    expect(unusable).toEqual([]);
+  });
+
+  it('`scope` is where the search runs, not something the locator ignores', () => {
+    const { unusable } = residualQueryChecks({ role: 'button', scope: '#a' });
+    expect(unusable).toEqual([]);
   });
 });
