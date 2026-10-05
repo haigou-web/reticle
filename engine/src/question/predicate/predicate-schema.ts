@@ -47,17 +47,20 @@ export type { Predicate, PropertyAssertion } from '@reticlehq/core';
  */
 function usedQueryFields(query: ElementQuery): ReadonlySet<string> {
   const used = new Set<string>();
-  // These four are not locator fields, so no branch below consumes them and none is dropped:
-  // `scope` narrows WHERE the search runs, `attrs` projects the match, `source` is the locator's own
-  // precise-match path (the same one `component` takes), and `self` selects the scope root. Claiming
-  // them here — unconditionally, whatever their value — is what keeps every field the caller wrote
-  // either consumed by the locator or checked as a residual, and none refused for merely existing.
-  // `source` and `self` in particular are unreachable from
-  // the branches below (a `by`+`value` query returns before them, and `self` may be `false`), so
-  // leaving them to a branch reported the locator ignoring a field it was just using.
+  // `scope`, `attrs` and `self` are not locator fields, so no branch below consumes them and none is
+  // dropped: `scope` narrows WHERE the search runs (resolved before any locator branch runs),
+  // `attrs` projects the match, and `self` selects the scope root. Claiming these here — whatever
+  // their value — is what keeps them from being refused for merely existing.
+  //
+  // `source` is deliberately NOT one of them. It IS a locator — the anchor `component` is, consumed
+  // on exactly the same two branches — and it is claimed there and only there. Claiming it here too
+  // is what let a `by`+`value` query, or a `self: true` one, report the locator as having used a
+  // `source` it never read: the browser resolves those by `by`+`value` (or the scope root) and
+  // returns before `findBySource` is reached, so the predicate could pass for an element other than
+  // the one the caller's source location identified. Unclaimed, it falls through to the residual
+  // walk and is refused — exactly as `component` already is in the same position.
   if (query.scope !== undefined) used.add('scope');
   if (query.attrs !== undefined) used.add('attrs');
-  if (query.source !== undefined) used.add('source');
   if (query.self !== undefined) used.add('self');
   // The browser's `self` branch checks subtree text when supplied, but skips every other locator.
   // Mark only text as consumed so role/name/etc. remain residual checks on the returned descriptor.
@@ -65,10 +68,20 @@ function usedQueryFields(query: ElementQuery): ReadonlySet<string> {
   if (query.by !== undefined && query.value !== undefined) {
     used.add('by').add('value');
     if (QueryBy.ROLE === query.by) used.add('name');
-    if (QueryBy.COMPONENT === query.by) used.add('component');
+    // `by: "component"` resolves through `findByComponent`, which tries the source stamp first and
+    // falls back to the component name — so a `source` written here IS consumed.
+    if (QueryBy.COMPONENT === query.by) {
+      used.add('component');
+      if (query.source !== undefined) used.add('source');
+    }
     return used;
   }
-  if (query.component !== undefined || query.source !== undefined) return used.add('component');
+  // The auto-anchor branch, reached only without `by`+`value`: `source` (precise) then `component`.
+  if (query.component !== undefined || query.source !== undefined) {
+    used.add('component');
+    if (query.source !== undefined) used.add('source');
+    return used;
+  }
   if (query.role !== undefined) return used.add('role').add('name');
   for (const field of ['text', 'label', 'placeholder', 'testid', 'alt'] as const) {
     if (query[field] !== undefined) return used.add(field);

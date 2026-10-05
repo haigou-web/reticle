@@ -230,7 +230,8 @@ describe('an unknown key inside `element.query` is refused too', () => {
 });
 
 /**
- * A field the locator itself uses must never come back as one it dropped.
+ * A field the locator itself uses must never come back as one it dropped — and a field it does NOT
+ * use must never come back as one it did.
  *
  * `residualQueryChecks` walks the query's OWN keys — every field the caller wrote — so every field
  * that is not a locator has to be CLAIMED in `usedQueryFields`, or it falls through to `unusable`
@@ -238,21 +239,50 @@ describe('an unknown key inside `element.query` is refused too', () => {
  * what makes the check complete: a hand-written list beside the schema is how `scope`, `self`,
  * `attrs` and `source` came to be absent from it in the first place (issue #1375).
  *
- * These are the four that were not claimed. The failure is not cosmetic: the message is what an agent
- * retries against, and it names the field it should keep using as the one to remove.
+ * `scope`, `self` and `attrs` are claimed unconditionally: none of them is a locator, so no branch
+ * can consume them and none can be dropped. `source` is different — it IS a locator, consumed on
+ * exactly the two branches `component` is — so it is claimed there and refused everywhere else.
+ * Claiming it unconditionally is what let a `by`+`value` or `self: true` predicate pass for an
+ * element other than the one the caller's source location identified.
  */
 describe('a field the locator uses is never reported as dropped', () => {
-  it('`source` resolves the match, so it is not unverifiable', () => {
-    // `by`+`value` returns from `usedQueryFields` before the component/source branch is reached, so
-    // `source` never entered `used` — and being an object rather than a string it could not be
-    // checked either. Both halves pushed it into `unusable`.
+  it('`source` is claimed on the anchor branches that read it', () => {
+    // No `by`+`value`: the auto-anchor path runs, and `findBySource` is consulted first.
+    const autoAnchor = residualQueryChecks({ source: { file: 'App.tsx', line: 4 } });
+    expect(autoAnchor.unusable).toEqual([]);
+    expect(autoAnchor.checks).toEqual([]);
+
+    // `by: "component"` resolves through `findByComponent`, which tries the source stamp first and
+    // falls back to the component name — so the `source` here IS read.
+    const byComponent = residualQueryChecks({
+      by: QueryBy.COMPONENT,
+      value: 'Foo',
+      source: { file: 'App.tsx', line: 4 },
+    });
+    expect(byComponent.unusable).toEqual([]);
+    expect(byComponent.checks).toEqual([]);
+  });
+
+  it('`source` is refused when the locator resolves by a `by`+`value` pair instead', () => {
+    // `by`+`value` returns from `usedQueryFields` before the component/source branch is reached, and
+    // the browser does the same: it resolves by role and never reads the source stamp. Reporting no
+    // verdict is the point — the alternative is a verdict for some other element.
     const { checks, unusable } = residualQueryChecks({
       by: QueryBy.ROLE,
       value: 'button',
       source: { file: 'App.tsx', line: 4 },
     });
-    expect(unusable).toEqual([]);
+    expect(unusable).toEqual(['source']);
     expect(checks).toEqual([]);
+  });
+
+  it('`source` is refused by `self: true`, which returns the scope root and nothing else', () => {
+    const { unusable } = residualQueryChecks({
+      source: { file: 'App.tsx', line: 4 },
+      scope: '#a',
+      self: true,
+    });
+    expect(unusable).toEqual(['source']);
   });
 
   it('`self: false` is a value, not a field to drop', () => {
