@@ -145,4 +145,41 @@ describe('parsePredicate turns a zod rejection into a sentence', () => {
       pathname: '/checkout',
     });
   });
+
+  it('does not read an empty `query` as a locator that is already there', () => {
+    // `query: {}` is accepted and locates nothing, so "the locator already sits in `query`" told the
+    // caller to delete the only target it had and retry against whatever else matched.
+    const message = messageOf({ kind: 'element', query: {}, ref: 'e1' });
+    expect(message).toContain('put the locator inside `query`');
+    expect(message).not.toContain('delete the `ref`');
+  });
+
+  it('reaches an `element` predicate nested past the shallow shapes', () => {
+    // The schema nests combinators without limit, so a cutoff on depth answered
+    // `allOf → not → anyOf → element` with the very error the locator clause exists to explain.
+    const message = messageOf({
+      kind: 'allOf',
+      predicates: [
+        { kind: 'not', predicate: { kind: 'anyOf', predicates: [{ kind: 'element', ref: 'e1' }] } },
+      ],
+    });
+    expect(message).toContain('element predicates take `query`');
+  });
+
+  it('counts the clauses past its limit instead of repeating one per member', () => {
+    // One rejected `anyOf` can carry an invalid `element` per member, and a clause each turned a
+    // single tool error into the same sentence repeated until the field list that answers the
+    // question was the hardest thing in it to find.
+    const members = [
+      { kind: 'element', ref: 'e1' },
+      { kind: 'element', ref: 'e2', timeout_ms: 1 },
+      { kind: 'element', ref: 'e3', sessionId: 's' },
+      { kind: 'element', ref: 'e4', action: 'click' },
+      { kind: 'element', ref: 'e5', args: {} },
+      { kind: 'element', ref: 'e6', target: 'x' },
+    ];
+    const message = messageOf({ kind: 'anyOf', predicates: members });
+    expect(message.match(/put the locator inside/g) ?? []).toHaveLength(1);
+    expect(message).toContain('more predicates need the same fix');
+  });
 });

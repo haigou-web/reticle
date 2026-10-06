@@ -155,6 +155,39 @@ const NESTED_PREDICATE_FIELDS: readonly string[] = ['predicates', 'predicate'];
 const KIND_ALIAS = 'type';
 
 /**
+ * How many locator clauses one rejection carries before the rest are counted instead.
+ *
+ * A rejected `anyOf`/`allOf` produces one clause per invalid member, and unlike the three-issue
+ * limit on schema errors these had none — so a single tool error could grow into the same sentence
+ * repeated until the advice that was asked for was the hardest thing in it to find.
+ */
+const MAX_LOCATOR_CLAUSES = 3;
+
+/** The clause for a `ref` beside a `query` that already holds a locator. */
+const ELEMENT_REF_DELETE_CLAUSE =
+  '`ref` is not a field of an `element` predicate: the locator already sits in `query`, ' +
+  'so delete the `ref` rather than moving it up beside `until`.';
+
+/** The clause for a `ref` written where the locator belongs, naming the fields `query` accepts. */
+function elementRefMoveClause(queryFields: string): string {
+  return (
+    '`ref` is not a locator on an `element` predicate: element predicates take `query` ' +
+    `(${queryFields}), not \`ref\` — put the locator inside \`query\`; a raw element ref ` +
+    'belongs in `query.scope`.'
+  );
+}
+
+/**
+ * Whether a written `query` actually carries a locator.
+ *
+ * `{}` is accepted by the schema and locates nothing, so presence of the key is not the question.
+ * Reading it as "the locator is already there" told the caller to delete the only target it had.
+ */
+function carriesLocator(query: unknown): boolean {
+  return 'object' === typeof query && null !== query && 0 < Object.keys(query).length;
+}
+
+/**
  * The kind as written, reading core's `type` spelling when `kind` is absent.
  *
  * `PredicateSchema` accepts `type` as the discriminator whenever `kind` is missing — core normalises
@@ -171,8 +204,15 @@ function kindAsWritten(input: unknown): unknown {
 
 /** The clause naming where a misplaced call argument goes, or '' when nothing was misplaced. */
 function misplacedCallFields(input: unknown): string {
-  const clauses = misplacedClauses(input, 0);
-  return 0 === clauses.length ? '' : ` ${clauses.join(' ')}`;
+  const clauses = [...new Set(misplacedClauses(input))];
+  // Bounded like the issue list above, and for the same reason: one rejected `anyOf` can carry an
+  // invalid `element` per member, and a clause each turns one tool error into a wall of the same
+  // sentence — which buries the advice instead of delivering it. The count is named rather than
+  // silently dropped, so a caller with a genuinely long list knows to look at the members.
+  const shown = clauses.slice(0, MAX_LOCATOR_CLAUSES);
+  const rest = clauses.length - shown.length;
+  if (0 < rest) shown.push(`${rest} more predicate${1 === rest ? '' : 's'} need the same fix.`);
+  return 0 === shown.length ? '' : ` ${shown.join(' ')}`;
 }
 
 /**
@@ -180,11 +220,12 @@ function misplacedCallFields(input: unknown): string {
  *
  * `anyOf`/`allOf` wrap a predicate, and wrapping the first `element` assertion of a session in one is
  * an ordinary way to write it — so the `ref`-as-locator answer has to reach that level too, or the
- * fix holds only for the spellings that happen to be top-level. Bounded at two levels: deeper than
- * that is not a retry an agent makes, and each extra sentence buries the clause that was asked for.
+ * fix holds only for the spellings that happen to be top-level. The walk is bounded by the number of
+ * clauses reported rather than by depth: the schema nests without limit, and a depth cutoff answered
+ * `allOf → not → anyOf → element` with the error this change exists to explain.
  */
-function misplacedClauses(input: unknown, depth: number): string[] {
-  if ('object' !== typeof input || null === input || 2 < depth) return [];
+function misplacedClauses(input: unknown): string[] {
+  if ('object' !== typeof input || null === input) return [];
   const obj = input as Record<string, unknown>;
   const written = Object.keys(input);
   const clauses: string[] = [];
@@ -205,14 +246,13 @@ function misplacedClauses(input: unknown, depth: number): string[] {
     // already right — a worse retry than the one it replaces. Derived from the schema rather than
     // listed here: a stale field list is worse than none, because the agent trusts it and retries
     // into the same wall.
+    //
+    // An EMPTY `query` is not a locator: `{}` parses, and deleting the `ref` as told would leave
+    // the predicate with no target at all. So the "already there" reading keys off `query`
+    // carrying at least one field, not off the key being present.
     const queryFields = (predicateNestedFieldsFor(PredicateKind.ELEMENT)['query'] ?? []).join('/');
     clauses.push(
-      obj['query'] !== undefined
-        ? '`ref` is not a field of an `element` predicate: the locator already sits in `query`, ' +
-            'so delete the `ref` rather than moving it up beside `until`.'
-        : '`ref` is not a locator on an `element` predicate: element predicates take `query` ' +
-            `(${queryFields}), not \`ref\` — put the locator inside \`query\`; a raw element ref ` +
-            'belongs in `query.scope`.',
+      carriesLocator(obj['query']) ? ELEMENT_REF_DELETE_CLAUSE : elementRefMoveClause(queryFields),
     );
   }
   const misplaced = CALL_LEVEL_FIELDS.filter(
@@ -232,7 +272,7 @@ function misplacedClauses(input: unknown, depth: number): string[] {
     const child = obj[field];
     if (child === undefined) continue;
     for (const nested of Array.isArray(child) ? child : [child]) {
-      clauses.push(...misplacedClauses(nested, depth + 1));
+      clauses.push(...misplacedClauses(nested));
     }
   }
   return clauses;
