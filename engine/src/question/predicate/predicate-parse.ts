@@ -110,10 +110,8 @@ export function parsePredicate(input: unknown): z.infer<typeof PredicateSchema> 
   }
   const parsed = PredicateSchema.safeParse(input);
   if (parsed.success) return parsed.data;
-  const kind =
-    'object' === typeof input && null !== input && 'kind' in input
-      ? String((input as Record<string, unknown>)['kind'])
-      : 'unknown';
+  const asWritten = kindAsWritten(input);
+  const kind = 'string' === typeof asWritten ? asWritten : 'unknown';
   // Bounded on purpose: a union rejection can produce one issue per member, and pasting all of them
   // back is how the zod array became unreadable in the first place.
   const issues = parsed.error.issues.slice(0, 3).map(describeIssue).join('; ');
@@ -143,9 +141,51 @@ const CALL_LEVEL_FIELDS: readonly string[] = [
   'intent',
 ];
 
+/** The fields that carry a predicate inside a predicate — `anyOf`/`allOf`, and `not`. */
+const NESTED_PREDICATE_FIELDS: readonly string[] = ['predicates', 'predicate'];
+
+/**
+ * `type`, read as the discriminator when — and only when — `kind` is absent.
+ *
+ * Spelled here rather than imported: core keeps this constant private, and `core-coupling-only-
+ * shrinks` counts every name the engine borrows — a one-word alias is not worth a permanent one.
+ * The two are held together by a test instead, so a change to the alias fails here rather than
+ * silently reintroducing the `kind "unknown"` reading this fixes.
+ */
+const KIND_ALIAS = 'type';
+
+/**
+ * The kind as written, reading core's `type` spelling when `kind` is absent.
+ *
+ * `PredicateSchema` accepts `type` as the discriminator whenever `kind` is missing — core normalises
+ * it in `applyPredicateAliases` before parsing, and an explicit `kind` still wins. Reading `kind`
+ * alone here is how `{ type: 'element', ref: 'e1' }` came back as `kind "unknown"` carrying the very
+ * #1374 advice the canonical spelling no longer gets. One reader for the sentence and the clause, so
+ * the two cannot disagree about which kind was written.
+ */
+function kindAsWritten(input: unknown): unknown {
+  if ('object' !== typeof input || null === input) return undefined;
+  const obj = input as Record<string, unknown>;
+  return obj['kind'] !== undefined ? obj['kind'] : obj[KIND_ALIAS];
+}
+
 /** The clause naming where a misplaced call argument goes, or '' when nothing was misplaced. */
 function misplacedCallFields(input: unknown): string {
-  if ('object' !== typeof input || null === input) return '';
+  const clauses = misplacedClauses(input, 0);
+  return 0 === clauses.length ? '' : ` ${clauses.join(' ')}`;
+}
+
+/**
+ * The clauses for this object, plus the same reading one level down.
+ *
+ * `anyOf`/`allOf` wrap a predicate, and wrapping the first `element` assertion of a session in one is
+ * an ordinary way to write it — so the `ref`-as-locator answer has to reach that level too, or the
+ * fix holds only for the spellings that happen to be top-level. Bounded at two levels: deeper than
+ * that is not a retry an agent makes, and each extra sentence buries the clause that was asked for.
+ */
+function misplacedClauses(input: unknown, depth: number): string[] {
+  if ('object' !== typeof input || null === input || 2 < depth) return [];
+  const obj = input as Record<string, unknown>;
   const written = Object.keys(input);
   const clauses: string[] = [];
   // `element` is the one kind where a `ref` is not a call argument one level too deep but a locator
@@ -153,13 +193,26 @@ function misplacedCallFields(input: unknown): string {
   // `query` — not up beside `until`. That advice is misdirection here: on `act_and_wait` moving a
   // `ref` up retargets the ACTION, and `reticle_assert` has no `until` at all, so the caller loses
   // its target and still does not parse. Named as the field to write instead, so the retry keeps it.
-  const kind = (input as Record<string, unknown>)['kind'];
+  //
+  // `ref: undefined` is not a locator written in the wrong place, so the clause keys off a value
+  // rather than off the key being present.
+  const kind = kindAsWritten(input);
   const refIsLocator =
-    'string' === typeof kind && PredicateKind.ELEMENT === kind && written.includes('ref');
+    'string' === typeof kind && PredicateKind.ELEMENT === kind && obj['ref'] !== undefined;
   if (refIsLocator) {
+    // The locator may ALREADY be in `query`, and then the only thing to do is delete the extra
+    // `ref`. "Put the locator inside `query`" would send the caller to rewrite a field that is
+    // already right — a worse retry than the one it replaces. Derived from the schema rather than
+    // listed here: a stale field list is worse than none, because the agent trusts it and retries
+    // into the same wall.
+    const queryFields = (predicateNestedFieldsFor(PredicateKind.ELEMENT)['query'] ?? []).join('/');
     clauses.push(
-      '`ref` is not a locator on an `element` predicate: element predicates take `query` ' +
-        '(role/name/testid/text), not `ref` — put the locator inside `query`.',
+      obj['query'] !== undefined
+        ? '`ref` is not a field of an `element` predicate: the locator already sits in `query`, ' +
+            'so delete the `ref` rather than moving it up beside `until`.'
+        : '`ref` is not a locator on an `element` predicate: element predicates take `query` ' +
+            `(${queryFields}), not \`ref\` — put the locator inside \`query\`; a raw element ref ` +
+            'belongs in `query.scope`.',
     );
   }
   const misplaced = CALL_LEVEL_FIELDS.filter(
@@ -175,7 +228,14 @@ function misplacedCallFields(input: unknown): string {
         'than dropping it — nesting is why the predicate did not parse.',
     );
   }
-  return 0 === clauses.length ? '' : ` ${clauses.join(' ')}`;
+  for (const field of NESTED_PREDICATE_FIELDS) {
+    const child = obj[field];
+    if (child === undefined) continue;
+    for (const nested of Array.isArray(child) ? child : [child]) {
+      clauses.push(...misplacedClauses(nested, depth + 1));
+    }
+  }
+  return clauses;
 }
 
 /**

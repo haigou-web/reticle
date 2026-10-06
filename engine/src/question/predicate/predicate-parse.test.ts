@@ -96,6 +96,49 @@ describe('parsePredicate turns a zod rejection into a sentence', () => {
     expect(message).not.toContain(' accepts: by,');
   });
 
+  it('reads core`s `type` spelling, so the locator answer is not skipped', () => {
+    // `type` is the discriminator core normalises before parsing, so `{ type: 'element', ref }` is
+    // the same predicate as the canonical spelling. Reading `kind` alone gave it the move-beside-
+    // `until` advice the canonical spelling no longer gets, plus a `kind "unknown"` diagnosis.
+    const message = messageOf({ type: 'element', ref: 'e1' });
+    expect(message).toContain('element predicates take `query`');
+    expect(message).not.toMatch(/argument of the CALL/i);
+    expect(message).not.toContain('beside `until`');
+    expect(message).not.toContain('kind "unknown"');
+  });
+
+  it('keeps its `type` spelling in step with core`s', () => {
+    // The engine spells `type` locally rather than importing core's private constant — the coupling
+    // ceiling counts every borrowed name — so this is what holds the two together. If core ever drops
+    // the alias, the clause above reads a kind nobody writes any more, and this line goes red rather
+    // than the message quietly reverting to `kind "unknown"`.
+    expect(parsePredicate({ type: 'element', query: { role: 'button' } })).toMatchObject({
+      kind: 'element',
+    });
+  });
+
+  it('says to delete the extra `ref` when the locator is already in `query`', () => {
+    // Telling the caller to "put the locator inside `query`" when it is already there sends it to
+    // rewrite a field that is already right; the only action left is removing the extra `ref`.
+    const message = messageOf({ kind: 'element', query: { testid: 'x' }, ref: 'e1' });
+    expect(message).toContain('already sits in `query`');
+    expect(message).toContain('delete the `ref`');
+    expect(message).not.toContain('put the locator inside');
+  });
+
+  it('reaches an `element` predicate wrapped in `anyOf`', () => {
+    // Wrapping the first `element` assertion of a session in a combinator is ordinary, so a fix
+    // that only holds at the top level leaves that spelling with no answer at all.
+    const message = messageOf({ kind: 'anyOf', predicates: [{ kind: 'element', ref: 'e1' }] });
+    expect(message).toContain('element predicates take `query`');
+  });
+
+  it('keeps both clauses when a locator and a call argument are written together', () => {
+    const message = messageOf({ kind: 'element', ref: 'e1', timeout_ms: 45_000 });
+    expect(message).toContain('element predicates take `query`');
+    expect(message).toMatch(/argument of the CALL/i);
+  });
+
   it('still parses a good predicate untouched, aliases included', () => {
     expect(parsePredicate({ kind: 'route', path: '/checkout' })).toMatchObject({
       kind: 'route',
